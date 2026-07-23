@@ -3,6 +3,13 @@ echo ==============================================
 echo Detectando instalacion de Python...
 echo ==============================================
 
+REM Intentar detectar el launcher "py" (recomendado en Windows)
+where py >nul 2>&1
+if %errorlevel% == 0 (
+    set PYTHON_EXE=py
+    goto :found
+)
+
 REM Intentar detectar Python en el PATH del sistema
 where python >nul 2>&1
 if %errorlevel% == 0 (
@@ -45,13 +52,19 @@ exit /b 1
 echo Python encontrado: %PYTHON_EXE%
 echo.
 echo ==============================================
-echo Instalando dependencias necesarias (pywin32)...
+echo Instalando dependencias necesarias...
 echo ==============================================
-%PYTHON_EXE% -m pip install pywin32 --quiet
+%PYTHON_EXE% -m pip install pywin32 shapely requests python-dotenv --quiet
 
 echo.
 echo ==============================================
-echo Ejecutando el Agente de Captura SAP...
+echo [1/2] Asignando Plantas por Celula Geografica...
+echo ==============================================
+%PYTHON_EXE% asignar_plantas.py
+
+echo.
+echo ==============================================
+echo [2/2] Ejecutando el Agente de Captura SAP...
 echo ==============================================
 %PYTHON_EXE% captura_sap.py
 

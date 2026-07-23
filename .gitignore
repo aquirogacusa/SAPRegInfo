@@ -5,3 +5,5 @@ __pycache__/
 *.xlsx
 ~$*
 Error.txt
+.env
+geocode_cache.json

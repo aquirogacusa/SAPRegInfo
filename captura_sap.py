@@ -99,6 +99,10 @@ def main():
         vtweg = cliente['CanalDist'].strip()
         plant = cliente['Planta'].strip()
         
+        if not plant:
+            print(f"[{idx_cliente}/{len(clientes)}] Cliente: {kunnr} -> Saltado: Planta vacia. Ejecuta asignar_plantas.py primero.")
+            continue
+        
         print(f"[{idx_cliente}/{len(clientes)}] Procesando Cliente: {kunnr} | Planta: {plant}")
         
         try:
