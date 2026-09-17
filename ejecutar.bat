@@ -54,19 +54,13 @@ echo.
 echo ==============================================
 echo Instalando dependencias necesarias...
 echo ==============================================
-%PYTHON_EXE% -m pip install pywin32 shapely requests python-dotenv --quiet
+%PYTHON_EXE% -m pip install pywin32 shapely requests python-dotenv certifi --quiet
 
 echo.
 echo ==============================================
-echo [1/2] Asignando Plantas por Celula Geografica...
+echo Ejecutando proceso completo (con log y notificacion)...
 echo ==============================================
-%PYTHON_EXE% asignar_plantas.py
-
-echo.
-echo ==============================================
-echo [2/2] Ejecutando el Agente de Captura SAP...
-echo ==============================================
-%PYTHON_EXE% captura_sap.py
+%PYTHON_EXE% run.py
 
 echo.
 pause

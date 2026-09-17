@@ -1,5 +1,6 @@
 import win32com.client
 import csv
+import json
 import sys
 import time
 import os
@@ -54,6 +55,17 @@ def leer_filtro_productos(ruta):
         print(f"No se pudo leer el archivo de filtros: {e}")
     return productos
 
+
+def leer_plantas_asignadas(ruta):
+    if not os.path.isfile(ruta):
+        return {}
+    try:
+        with open(ruta, mode='r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"No se pudo leer el archivo de plantas asignadas: {e}")
+        return {}
+
 def scroll_al_inicio(session):
     for _ in range(5):
         try:
@@ -76,6 +88,7 @@ def main():
     # Leer datos de los archivos CSV
     clientes = leer_csv('clientes.csv')
     productos_dict = leer_csv('productos.csv')
+    plantas = leer_plantas_asignadas('plantas_asignadas.json')
     
     if not clientes or not productos_dict:
         print("Asegúrate de que 'clientes.csv' y 'productos.csv' tengan datos y estén en la misma carpeta.")
@@ -97,7 +110,8 @@ def main():
         kunnr = cliente['Cliente'].strip()
         vkorg = cliente['OrgVentas'].strip()
         vtweg = cliente['CanalDist'].strip()
-        plant = cliente['Planta'].strip()
+        planta_manual = (cliente.get('Planta') or cliente.get('Plant') or '').strip()
+        plant = planta_manual or (plantas.get(kunnr, '') or '').strip()
         
         if not plant:
             print(f"[{idx_cliente}/{len(clientes)}] Cliente: {kunnr} -> Saltado: Planta vacia. Ejecuta asignar_plantas.py primero.")

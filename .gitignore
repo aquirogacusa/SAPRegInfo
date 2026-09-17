@@ -7,3 +7,6 @@ __pycache__/
 Error.txt
 .env
 geocode_cache.json
+plantas_asignadas.json
+logs/
+Diagnostico_*.txt

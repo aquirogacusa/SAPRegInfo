@@ -1,10 +1,40 @@
 import csv
 import json
 import os
+import ssl
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+
+try:
+    import certifi
+except ImportError:
+    print("================================================================")
+    print("ERROR: Falta la libreria 'certifi'")
+    print("Instala con:  pip install certifi")
+    print("================================================================")
+    sys.exit(1)
+
+_SSL_CONTEXT = ssl.create_default_context()
+try:
+    _SSL_CONTEXT.load_verify_locations(cafile=certifi.where())
+except ssl.SSLError:
+    pass
+_SSL_CONTEXT.load_default_certs(ssl.Purpose.SERVER_AUTH)
+
+_SSL_CONTEXT_INSECURE = ssl.create_default_context()
+_SSL_CONTEXT_INSECURE.check_hostname = False
+_SSL_CONTEXT_INSECURE.verify_mode = ssl.CERT_NONE
+
+_SSL_ALLOW_INSECURE = os.getenv("MAPBOX_SSL_ALLOW_INSECURE", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "si",
+    "s",
+)
 
 try:
     from shapely.geometry import Point, Polygon
@@ -24,6 +54,7 @@ except ImportError:
 CLIENTES_CSV = "clientes.csv"
 CELULAS_JSON = "celulas_geograficas.json"
 CACHE_JSON = "geocode_cache.json"
+PLANTAS_JSON = "plantas_asignadas.json"
 MAPBOX_TOKEN = os.getenv("MAPBOX_ACCESS_TOKEN", "")
 
 
@@ -83,11 +114,25 @@ def geocodificar_mapbox(direccion, cache, token):
 
     try:
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        print(f"   -> Error de geocodificacion: {e}")
-        return None
+        es_error_ssl = isinstance(e, ssl.SSLError) or (
+            isinstance(e, urllib.error.URLError)
+            and isinstance(getattr(e, "reason", None), ssl.SSLError)
+        )
+        if es_error_ssl and _SSL_ALLOW_INSECURE:
+            print("   -> Fallo la verificacion SSL (proxy Netskope). Reintentando sin verificar el certificado...")
+            try:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT_INSECURE) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception as e2:
+                print(f"   -> Error de geocodificacion: {e2}")
+                return None
+        else:
+            print(f"   -> Error de geocodificacion: {e}")
+            return None
 
     features = data.get("features", [])
     if not features:
@@ -126,13 +171,26 @@ def leer_clientes(ruta):
 def guardar_clientes(ruta, clientes, nombres_columnas):
     try:
         with open(ruta, mode="w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=nombres_columnas)
+            writer = csv.DictWriter(f, fieldnames=nombres_columnas, extrasaction="ignore")
             writer.writeheader()
             for c in clientes:
                 writer.writerow(c)
     except Exception as e:
         print(f"ERROR al escribir {ruta}: {e}")
         sys.exit(1)
+
+
+def guardar_plantas(ruta, asignaciones):
+    try:
+        with open(ruta, mode="w", encoding="utf-8") as f:
+            json.dump(asignaciones, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"ADVERTENCia: No se pudo guardar {ruta}: {e}")
+
+
+def planta_del_usuario(fila):
+    valor = (fila.get("Planta") or fila.get("Plant") or "").strip()
+    return valor
 
 
 def main():
@@ -163,10 +221,20 @@ def main():
         print(f"Cache con {len(cache)} direcciones pre-codificadas.\n")
 
     columnas = list(clientes[0].keys())
+    if "Planta" not in columnas:
+        columnas.append("Planta")
+
+    asignaciones = {}
 
     print("-" * 50)
     for i, cliente in enumerate(clientes, 1):
         kunnr = cliente.get("Cliente", "").strip()
+
+        planta_manual = planta_del_usuario(cliente)
+        if planta_manual:
+            print(f"[{i}/{len(clientes)}] Cliente {kunnr}: planta manual ({planta_manual}), se respeta.")
+            continue
+
         street = cliente.get("Street", "").strip()
         city = cliente.get("City", "").strip()
         state = cliente.get("State", "").strip()
@@ -192,7 +260,7 @@ def main():
 
         nombre_celula, planta = asignar_planta(lat, lng, celulas)
         if planta:
-            cliente["Planta"] = planta
+            asignaciones[kunnr] = planta
             print(f"   -> Celula: {nombre_celula} | Planta asignada: {planta}")
         else:
             print(f"   -> ADVERTENCia: No cayo en ninguna celula. Planta sin asignar.")
@@ -201,11 +269,21 @@ def main():
 
     print("-" * 50)
 
-    print("\nGuardando clientes.csv actualizado...")
+    print("\nGuardando clientes.csv actualizado (se conserva la columna Planta manual)...")
     guardar_clientes(CLIENTES_CSV, clientes, columnas)
 
     print("Guardando cache de geocodificacion...")
     guardar_cache(CACHE_JSON, cache)
+
+    print(f"Guardando asignaciones de plantas en {PLANTAS_JSON}...")
+    guardar_plantas(PLANTAS_JSON, asignaciones)
+
+    print("\nResumen de asignaciones:")
+    if asignaciones:
+        for kunnr, planta in asignaciones.items():
+            print(f"   {kunnr} -> Planta {planta}")
+    else:
+        print("   No se asignaron plantas.")
 
     print("\nProceso finalizado.")
 
