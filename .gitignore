@@ -10,3 +10,5 @@ geocode_cache.json
 plantas_asignadas.json
 logs/
 Diagnostico_*.txt
+
+*.mp4
