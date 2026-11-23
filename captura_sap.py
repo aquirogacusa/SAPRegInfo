@@ -76,21 +76,77 @@ def leer_plantas_asignadas(ruta):
         print(f"No se pudo leer el archivo de plantas asignadas: {e}")
         return {}
 
-def scroll_al_inicio(session):
-    for _ in range(5):
+def esperar_control(session, id_control, timeout=8.0, intervalo=0.25):
+    """Espera activa hasta que el control exista (en vez de sleeps fijos).
+    Retorna el control o None si expira el timeout."""
+    fin = time.time() + timeout
+    while time.time() < fin:
+        try:
+            return session.findById(id_control)
+        except Exception:
+            time.sleep(intervalo)
+    return None
+
+def cerrar_modales(session, max_pasadas=4):
+    """Cierra popups/modales en cadena prefiriendo 'No'/Cancelar: nunca el
+    boton por defecto, para no arrastrar datos de la consulta anterior."""
+    for _ in range(max_pasadas):
+        try:
+            session.findById("wnd[1]")
+        except Exception:
+            return  # No hay modal
+        try:
+            session.findById("wnd[1]/usr/btnSPOP-OPTION2").press()  # Boton "No"
+        except Exception:
+            try:
+                session.findById("wnd[1]/tbar[0]/btn[12]").press()  # Cancelar
+            except Exception:
+                try:
+                    session.findById("wnd[1]").sendVKey(12)
+                except Exception:
+                    pass
+        time.sleep(0.3)
+
+def scroll_al_inicio(session, table_id=None):
+    """Scroll al inicio de la tabla. El setFocus garantiza que el scroll
+    llegue a la tabla (sin foco, los Page Up no la afectan)."""
+    if table_id:
+        try:
+            session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").setFocus()
+        except Exception:
+            pass
+    pos_previa = None
+    for _ in range(6):
         try:
             session.findById("wnd[0]").sendVKey(81)  # Page Up
-            time.sleep(0.1)
+            time.sleep(0.05)
+            if table_id:
+                pos = session.findById(table_id).FirstVisibleRow
+                if pos == pos_previa:
+                    return
+                pos_previa = pos
         except Exception:
-            break
+            return
 
-def scroll_al_final(session):
-    for _ in range(5):
+def scroll_al_final(session, table_id=None):
+    """Scroll al final de la tabla con Page Down verificado (con foco en ella)."""
+    if table_id:
+        try:
+            session.findById(table_id).setFocus()
+        except Exception:
+            pass
+    pos_previa = None
+    for _ in range(6):
         try:
             session.findById("wnd[0]").sendVKey(82)  # Page Down
-            time.sleep(0.1)
+            time.sleep(0.05)
+            if table_id:
+                pos = session.findById(table_id).FirstVisibleRow
+                if pos == pos_previa:
+                    return
+                pos_previa = pos
         except Exception:
-            break
+            return
 
 def main():
     session = get_sap_session()
@@ -136,105 +192,106 @@ def main():
         t_cliente = time.time()
 
         try:
-            # Cancelar cualquier transaccion/pantalla previa que haya quedado abierta.
-            # F12 repetido cancela primero los modales pendientes ("¿Guardar cambios?")
-            # y luego la pantalla activa, evitando arrastrar el contexto/autocompletado
-            # de la consulta anterior.
-            for _ in range(4):
-                try:
-                    session.findById("wnd[0]").sendVKey(12)  # F12 = Cancelar
-                    time.sleep(0.3)
-                except Exception:
-                    break
+            # OPTIMIZACION: si ya estamos en la pantalla de seleccion de VD52
+            # (el guardado del cliente anterior regresa aqui), se reutiliza la
+            # pantalla y se omiten los F12 y el /nVD52: menos flashazos y menos
+            # tiempo muerto por cliente.
+            cerrar_modales(session)  # por si quedo un popup del guardado anterior
+            en_vd52 = False
+            try:
+                if session.info.Transaction == "VD52":
+                    en_vd52 = esperar_control(session, "wnd[0]/usr/ctxtKUNNR", timeout=2.0, intervalo=0.2) is not None
+            except Exception:
+                en_vd52 = False
 
-            # Abrir VD52 reintentando la NAVEGACION completa: antes solo se
-            # reintentaba el llenado de campos, lo que fallaba cuando la pantalla
-            # de seleccion nunca llego a cargar (quedaba pegado en la corrida anterior).
-            max_nav = 4
-            pantalla_ok = False
-            for nav_intent in range(1, max_nav + 1):
-                session.findById("wnd[0]/tbar[0]/okcd").text = "/nVD52"
-                session.findById("wnd[0]").sendVKey(0)
-                time.sleep(2.0)  # Esperar a que SAP cargue la pantalla de VD52
-
-                # Cerrar cualquier popup/modal (ej. "¿Guardar cambios?"). Hasta 4 por
-                # si aparecen varios en cadena. Preferimos "No"/Cancelar: nunca el
-                # boton por defecto, para no arrastrar datos de la consulta anterior.
+            if not en_vd52:
+                # Cancelar cualquier transaccion/pantalla previa que haya quedado
+                # abierta. F12 repetido cancela primero los modales pendientes
+                # ("¿Guardar cambios?") y luego la pantalla activa.
                 for _ in range(4):
                     try:
-                        session.findById("wnd[1]")
+                        session.findById("wnd[0]").sendVKey(12)  # F12 = Cancelar
+                        time.sleep(0.3)
                     except Exception:
-                        break  # No hay modal, continuamos
-                    try:
-                        session.findById("wnd[1]/usr/btnSPOP-OPTION2").press()  # Boton "No"
-                    except Exception:
-                        try:
-                            session.findById("wnd[1]/tbar[0]/btn[12]").press()  # Cancelar
-                        except Exception:
-                            try:
-                                session.findById("wnd[1]").sendVKey(12)
-                            except Exception:
-                                pass
-                    time.sleep(0.5)
+                        break
 
-                # Verificar que SI estamos en la pantalla de seleccion de VD52
-                # y llenar los datos del cliente solo cuando el control exista
-                try:
-                    session.findById("wnd[0]/usr/ctxtKUNNR").text = kunnr
-                    session.findById("wnd[0]/usr/ctxtVKORG").text = vkorg
-                    session.findById("wnd[0]/usr/ctxtVTWEG").text = vtweg
-                    pantalla_ok = True
-                    break
-                except Exception:
+                # Abrir VD52 reintentando la NAVEGACION completa.
+                max_nav = 4
+                for nav_intent in range(1, max_nav + 1):
+                    session.findById("wnd[0]/tbar[0]/okcd").text = "/nVD52"
+                    session.findById("wnd[0]").sendVKey(0)
+
+                    # Espera activa a la pantalla de seleccion (no sleep fijo)
+                    if esperar_control(session, "wnd[0]/usr/ctxtKUNNR", timeout=6.0, intervalo=0.25):
+                        break
+
+                    cerrar_modales(session)
                     txn = ""
                     try:
                         txn = session.info.Transaction
                     except Exception:
                         pass
                     print(f"   -> Pantalla de seleccion no disponible (intento {nav_intent}/{max_nav}, txn={txn}). Reintentando...")
-                    time.sleep(1.5)
+                    time.sleep(1.0)
 
-            if not pantalla_ok:
+            # Verificar que SI estamos en la pantalla de seleccion de VD52
+            # y llenar los datos del cliente solo cuando el control exista
+            if esperar_control(session, "wnd[0]/usr/ctxtKUNNR", timeout=6.0, intervalo=0.25) is None:
+                txn = ""
+                try:
+                    txn = session.info.Transaction
+                except Exception:
+                    pass
                 raise RuntimeError(
-                    "No se pudo abrir la pantalla de seleccion de VD52 despues de "
-                    "varios intentos. Verifica que SAP este logueado y sin ventanas pendientes."
+                    f"No se pudo abrir la pantalla de seleccion de VD52 (txn={txn}). "
+                    "Verifica que SAP este logueado y sin ventanas pendientes."
                 )
+            session.findById("wnd[0]/usr/ctxtKUNNR").text = kunnr
+            session.findById("wnd[0]/usr/ctxtVKORG").text = vkorg
+            session.findById("wnd[0]/usr/ctxtVTWEG").text = vtweg
             
             print(f"   -> Ingresando Cliente: {kunnr}")
             print(f"   -> Ingresando Org Ventas: {vkorg}")
             print(f"   -> Ingresando Canal Dist: {vtweg}")
             
-            # Limpiar TODOS los campos de texto de la pantalla excepto los tres requeridos.
-            # Esto elimina cualquier filtro de "memoria de campo" de SAP (ej. Material)
-            # sin importar cuál sea el ID exacto del campo ni si es rango o valor simple.
+            # Limpiar el campo Material (rango) que queda de la consulta anterior.
+            # Via rapida: IDs directos. Fallback: enumeracion completa de campos.
             print("   -> Limpiando campos extra de la pantalla de selección...")
-            # Usamos los SUFIJOS de los IDs porque SAP puede devolver el path completo
-            # (/app/con[0]/ses[0]/wnd[0]/usr/ctxtKUNNR) en lugar del path corto (wnd[0]/usr/ctxtKUNNR)
-            sufijos_requeridos = ("ctxtKUNNR", "ctxtVKORG", "ctxtVTWEG")
-            try:
-                usr_container = session.findById("wnd[0]/usr")
-                for i in range(usr_container.Children.Count):
-                    try:
-                        child = usr_container.Children(i)
-                        child_id = child.Id
-                        # Verificar si el campo es uno de los requeridos por sufijo
-                        es_requerido = any(child_id.endswith(s) for s in sufijos_requeridos)
-                        if not es_requerido:
-                            try:
-                                if child.text and child.text.strip():
-                                    child.text = ""
-                                    print(f"      Campo limpiado: {child_id}")
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-            except Exception as enum_err:
-                print(f"   -> No se pudo enumerar campos (ignorando): {enum_err}")
+            limpiado_directo = False
+            for cid in ("wnd[0]/usr/ctxtMATNR_R-LOW", "wnd[0]/usr/ctxtMATNR_R-HIGH"):
+                try:
+                    campo = session.findById(cid)
+                    limpiado_directo = True
+                    if campo.text and campo.text.strip():
+                        campo.text = ""
+                        print(f"      Campo limpiado: {cid}")
+                except Exception:
+                    pass
             
-            # Re-confirmar los valores requeridos por si acaso
-            session.findById("wnd[0]/usr/ctxtKUNNR").text = kunnr
-            session.findById("wnd[0]/usr/ctxtVKORG").text = vkorg
-            session.findById("wnd[0]/usr/ctxtVTWEG").text = vtweg
+            if not limpiado_directo:
+                # Fallback: limpiar TODOS los campos de texto excepto los tres
+                # requeridos, sin importar el ID exacto ni si es rango o valor.
+                # Usamos los SUFIJOS de los IDs porque SAP puede devolver el path
+                # completo (/app/con[0]/ses[0]/wnd[0]/usr/ctxtKUNNR).
+                sufijos_requeridos = ("ctxtKUNNR", "ctxtVKORG", "ctxtVTWEG")
+                try:
+                    usr_container = session.findById("wnd[0]/usr")
+                    for i in range(usr_container.Children.Count):
+                        try:
+                            child = usr_container.Children(i)
+                            child_id = child.Id
+                            es_requerido = any(child_id.endswith(s) for s in sufijos_requeridos)
+                            if not es_requerido:
+                                try:
+                                    if child.text and child.text.strip():
+                                        child.text = ""
+                                        print(f"      Campo limpiado: {child_id}")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                except Exception as enum_err:
+                    print(f"   -> No se pudo enumerar campos (ignorando): {enum_err}")
             
             # --- APLICAR FILTRO DE PRODUCTOS (si existe) ---
             if productos_filtro:
@@ -242,12 +299,12 @@ def main():
                 try:
                     # Abrir el dialogo de seleccion multiple del campo Material
                     session.findById("wnd[0]/usr/btn%_MATNR_R_%_APP_%-VALU_PUSH").press()
-                    time.sleep(0.5)
+                    esperar_control(session, "wnd[1]/tbar[0]/btn[24]", timeout=4.0, intervalo=0.2)
 
                     # Eliminar cualquier lista previa que haya quedado en la "memoria" del autocompletar de SAP
                     try:
                         session.findById("wnd[1]/tbar[0]/btn[16]").press()
-                        time.sleep(0.3)
+                        time.sleep(0.2)
                     except Exception:
                         pass
 
@@ -257,11 +314,11 @@ def main():
 
                     # Pegar desde el portapapeles (boton Paste del dialogo de rangos)
                     session.findById("wnd[1]/tbar[0]/btn[24]").press()
-                    time.sleep(0.8)
+                    time.sleep(0.5)
 
                     # Aceptar el dialogo de rangos (Copy/Continue)
                     session.findById("wnd[1]/tbar[0]/btn[8]").press()
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                 except Exception as filtro_err:
                     print(f"   -> ERROR al aplicar filtro de productos: {filtro_err}")
                     # Intentar cerrar el dialogo de rangos si quedo abierto
@@ -270,25 +327,36 @@ def main():
                     except Exception:
                         pass
             
+            table_id = "wnd[0]/usr/tblSAPMV10ATC_CU_MA"
+            
             # Ir directamente a Ejecutar (F8) SIN presionar Enter primero.
             # Presionar Enter activa el historial de campo de SAP y puede restaurar
             # el último material buscado como filtro no deseado.
             print("   -> Ejecutando búsqueda (F8) sin pasar por Enter...")
             try:
                 session.findById("wnd[0]/tbar[1]/btn[8]").press()
-                time.sleep(1.5)
             except Exception:
                 # Si F8 no está disponible directamente, usar Enter como fallback
                 print("   -> F8 no disponible, usando Enter como fallback...")
                 session.findById("wnd[0]").sendVKey(0)
-                time.sleep(1.5)
                 try:
                     session.findById("wnd[0]/tbar[1]/btn[8]").press()
-                    time.sleep(1)
                 except Exception:
                     pass
             
-            table_id = "wnd[0]/usr/tblSAPMV10ATC_CU_MA"
+            # Espera activa a los resultados: tabla presente O error de consulta
+            fin_espera = time.time() + 10.0
+            while time.time() < fin_espera:
+                try:
+                    session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]")
+                    break
+                except Exception:
+                    try:
+                        if session.findById("wnd[0]/sbar").MessageType == "E":
+                            break  # error de consulta: lo detectara la Fase 1
+                    except Exception:
+                        pass
+                    time.sleep(0.25)
             
             # Leer el número de filas visibles una sola vez al inicio para evitar errores COM tras modificar celdas
             tabla = session.findById(table_id)
@@ -314,6 +382,10 @@ def main():
                         break
             except Exception:
                 celda_planta_prefijo = None
+            if celda_planta_prefijo:
+                print(f"   -> Columna de planta detectada en tabla: escritura directa ({celda_planta_prefijo.split('/')[-1]})")
+            else:
+                print("   -> Columna de planta no detectada: se usara la via detalle (F2) por producto.")
             
             # --- FASE 1: LEER PRODUCTOS EXISTENTES EN SAP (OPTIMIZADO) ---
             # OPTIMIZACION: como la consulta ya viene filtrada por Material
@@ -379,10 +451,12 @@ def main():
                     if target_claves and target_claves.issubset(existing_claves):
                         break
 
-                    # Avanzar pagina; detectar el fin con 1 sola lectura COM
+                    # Avanzar pagina CON foco en la tabla (sin foco el Page Down
+                    # no llega a la tabla y el escaneo se detendria en la pag. 1)
                     try:
+                        session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").setFocus()
                         session.findById("wnd[0]").sendVKey(82)  # Page Down
-                        time.sleep(0.2)
+                        time.sleep(0.1)
                         pos_despues = session.findById(table_id).FirstVisibleRow
                         if pos_antes is not None and pos_despues == pos_antes:
                             break  # la vista no avanzo: fin de la tabla
@@ -404,7 +478,7 @@ def main():
                 # Ir al final de la tabla (solo si hay registros previos; si la
                 # tabla esta vacia la primera fila libre esta al inicio)
                 if existing_materials:
-                    scroll_al_final(session)
+                    scroll_al_final(session, table_id)
                 
                 def buscar_fila_vacia():
                     """Busca la primera fila vacía en la pantalla actual.
@@ -423,9 +497,14 @@ def main():
                 while row_in_screen == -1:
                     print("   -> Pantalla sin filas vacías. Validando y bajando más...")
                     session.findById("wnd[0]").sendVKey(0)   # Enter para validar
+                    cerrar_modales(session)
+                    try:
+                        session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").setFocus()
+                    except Exception:
+                        pass
                     session.findById("wnd[0]").sendVKey(82)  # Page Down
-                    time.sleep(0.5)
-                    scroll_al_final(session)
+                    time.sleep(0.3)
+                    scroll_al_final(session, table_id)
                     row_in_screen = buscar_fila_vacia()
                 
                 # Insertar los nuevos productos
@@ -434,20 +513,30 @@ def main():
                     if row_in_screen >= vis_rows or row_in_screen == -1:
                         print("   -> Página llena. Validando y avanzando de página...")
                         session.findById("wnd[0]").sendVKey(0)   # Enter para validar
+                        cerrar_modales(session)  # por si SAP abre popup al validar
+                        try:
+                            session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").setFocus()
+                        except Exception:
+                            pass
                         session.findById("wnd[0]").sendVKey(82)  # Page Down
-                        time.sleep(0.5)
+                        time.sleep(0.3)
                         
                         # Ir al final nuevamente
-                        scroll_al_final(session)
+                        scroll_al_final(session, table_id)
                         
                         # Buscar fila vacía de forma segura
                         row_in_screen = buscar_fila_vacia()
                         while row_in_screen == -1:
                             print("   -> Pantalla sin filas vacías. Validando y bajando más...")
                             session.findById("wnd[0]").sendVKey(0)   # Enter
+                            cerrar_modales(session)
+                            try:
+                                session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").setFocus()
+                            except Exception:
+                                pass
                             session.findById("wnd[0]").sendVKey(82)  # Page Down
-                            time.sleep(0.5)
-                            scroll_al_final(session)
+                            time.sleep(0.3)
+                            scroll_al_final(session, table_id)
                             row_in_screen = buscar_fila_vacia()
                     
                     print(f"   -> Escribiendo nuevo producto {matnr} en fila visible {row_in_screen}")
@@ -473,7 +562,7 @@ def main():
                 print(f"   -> Asignando/actualizando plantas para {len(claves_por_marcar)} productos...")
 
                 # Volver al inicio de la tabla
-                scroll_al_inicio(session)
+                scroll_al_inicio(session, table_id)
 
                 paginas_vistas_f3 = set()
                 while True:
@@ -504,14 +593,21 @@ def main():
 
                         print(f"   -> Asignando planta a {matnr} (fila {row_in_screen})...")
 
-                        # Intento 1: escritura directa en la celda de planta (rapido)
+                        # Intento 1: escritura directa en la celda de planta (rapido).
+                        # Se lee ANTES de escribir: si ya tiene la planta objetivo no
+                        # se toca (y evita una "verificacion" vacua que siempre pasa).
                         asignada = False
                         if celda_planta_prefijo:
                             try:
                                 celda = session.findById(f"{celda_planta_prefijo}[0,{row_in_screen}]")
-                                celda.text = plant
                                 if celda.text.strip() == plant:
                                     asignada = True
+                                else:
+                                    celda.text = plant
+                                    if celda.text.strip() == plant:
+                                        asignada = True
+                                    else:
+                                        print(f"      Celda no acepto el valor; usando via detalle...")
                             except Exception:
                                 asignada = False
 
@@ -543,10 +639,12 @@ def main():
                     if claves_por_marcar.issubset(updated_products):
                         break
 
-                    # Avanzar pagina; detectar el fin con 1 sola lectura COM
+                    # Avanzar pagina CON foco en la tabla (sin foco el Page Down
+                    # no llega a la tabla y quedarian filas sin marcar)
                     try:
+                        session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").setFocus()
                         session.findById("wnd[0]").sendVKey(82)  # Page Down
-                        time.sleep(0.2)
+                        time.sleep(0.1)
                         pos_despues = session.findById(table_id).FirstVisibleRow
                         if pos_antes is not None and pos_despues == pos_antes:
                             break  # la vista no avanzo: fin de la tabla
@@ -559,9 +657,26 @@ def main():
                 # Si se escribieron plantas directo en celdas, validar antes de guardar
                 if updated_products and celda_planta_prefijo:
                     session.findById("wnd[0]").sendVKey(0)  # Enter para validar ediciones
-                    time.sleep(0.5)
+                    cerrar_modales(session)
+                    time.sleep(0.3)
+
+                # Alertar si quedaron productos sin pasar por la asignacion
+                faltantes = claves_por_marcar - updated_products
+                if faltantes:
+                    muestra = ", ".join(sorted(faltantes)[:5])
+                    print(f"   -> AVISO: {len(faltantes)} productos quedaron sin asignar planta: {muestra}")
 
             session.findById("wnd[0]/tbar[0]/btn[11]").press()
+            cerrar_modales(session)  # por si el guardado abre popup de confirmacion
+            
+            # Verificacion post-guardado: SAP avisa si no hubo cambios pendientes
+            try:
+                sbar_txt = session.findById("wnd[0]/sbar").Text or ""
+                if "no info to be saved" in sbar_txt.lower():
+                    print(f"   -> AVISO: SAP reporto '{sbar_txt}' (no habia cambios pendientes que guardar).")
+            except Exception:
+                pass
+            
             print(f" -> ¡Cliente {kunnr} guardado con éxito!")
 
             # Estadisticas para corridas largas
