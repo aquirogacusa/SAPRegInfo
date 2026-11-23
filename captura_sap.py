@@ -107,6 +107,33 @@ def cerrar_modales(session, max_pasadas=4):
                     pass
         time.sleep(0.3)
 
+def avanzar_pagina(session, table_id):
+    """Avanza una pagina de la tabla usando el mismo mecanismo verificado que
+    funciona al insertar: foco en el CONTROL de tabla (no en una celda) +
+    Page Down + verificacion de que la vista realmente avanzo.
+    Retorna True si avanzo, False si estaba al final (o no se pudo verificar)."""
+    try:
+        session.findById(table_id).setFocus()
+    except Exception:
+        pass
+    try:
+        pos_antes = session.findById(table_id).FirstVisibleRow
+    except Exception:
+        pos_antes = None
+    try:
+        session.findById("wnd[0]").sendVKey(82)  # Page Down
+        time.sleep(0.1)
+    except Exception:
+        return False
+    try:
+        pos_despues = session.findById(table_id).FirstVisibleRow
+        if pos_antes is not None and pos_despues == pos_antes:
+            return False  # no avanzo: fin de la tabla
+        return True
+    except Exception:
+        return True  # no se pudo verificar; el dedup de paginas evita bucles
+
+
 def scroll_al_inicio(session, table_id=None):
     """Scroll al inicio de la tabla. El setFocus garantiza que el scroll
     llegue a la tabla (sin foco, los Page Up no la afectan)."""
@@ -422,12 +449,6 @@ def main():
                 target_claves = {clave_material(p) for p in productos_objetivo}
                 paginas_vistas = set()
                 while True:
-                    tabla = session.findById(table_id)
-                    try:
-                        pos_antes = tabla.FirstVisibleRow
-                    except Exception:
-                        pos_antes = None
-
                     current_page = []
                     for row_in_screen in range(vis_rows):
                         try:
@@ -451,17 +472,9 @@ def main():
                     if target_claves and target_claves.issubset(existing_claves):
                         break
 
-                    # Avanzar pagina CON foco en la tabla (sin foco el Page Down
-                    # no llega a la tabla y el escaneo se detendria en la pag. 1)
-                    try:
-                        session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").setFocus()
-                        session.findById("wnd[0]").sendVKey(82)  # Page Down
-                        time.sleep(0.1)
-                        pos_despues = session.findById(table_id).FirstVisibleRow
-                        if pos_antes is not None and pos_despues == pos_antes:
-                            break  # la vista no avanzo: fin de la tabla
-                    except Exception:
-                        break
+                    # Avanzar pagina con el mecanismo verificado (foco en la tabla)
+                    if not avanzar_pagina(session, table_id):
+                        break  # no avanzo: fin de la tabla
 
                 print(f"   -> Se encontraron {len(existing_materials)} productos existentes.")
             
@@ -566,12 +579,6 @@ def main():
 
                 paginas_vistas_f3 = set()
                 while True:
-                    tabla = session.findById(table_id)
-                    try:
-                        pos_antes = tabla.FirstVisibleRow
-                    except Exception:
-                        pos_antes = None
-
                     current_page = []
                     for row_in_screen in range(vis_rows):
                         try:
@@ -639,17 +646,9 @@ def main():
                     if claves_por_marcar.issubset(updated_products):
                         break
 
-                    # Avanzar pagina CON foco en la tabla (sin foco el Page Down
-                    # no llega a la tabla y quedarian filas sin marcar)
-                    try:
-                        session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").setFocus()
-                        session.findById("wnd[0]").sendVKey(82)  # Page Down
-                        time.sleep(0.1)
-                        pos_despues = session.findById(table_id).FirstVisibleRow
-                        if pos_antes is not None and pos_despues == pos_antes:
-                            break  # la vista no avanzo: fin de la tabla
-                    except Exception:
-                        break
+                    # Avanzar pagina con el mecanismo verificado (foco en la tabla)
+                    if not avanzar_pagina(session, table_id):
+                        break  # no avanzo: fin de la tabla
 
                 if filas_sin_planta:
                     print(f"   -> AVISO: no se pudo asignar planta a: {', '.join(filas_sin_planta)}")
