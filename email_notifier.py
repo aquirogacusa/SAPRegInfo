@@ -145,7 +145,39 @@ def _enviar_via_smtp(smtp_server, smtp_port, sender_email, sender_password, use_
         return False
 
 
+def _enviar_via_teams(webhook_url, subject, body, logger):
+    """Notifica a un canal de Teams via webhook. Funciona con el Incoming
+    Webhook clasico y con el Workflow de Power Automate ("Post to a channel
+    when a webhook request is received"): ambos aceptan POST con {"text": ...}.
+    Sin correos, sin dominios, sin permisos por IP."""
+    texto = f"**{subject}**\n\n{body}"
+    if len(texto) > 3500:
+        texto = texto[:3500] + "\n...(contenido truncado)"
+    try:
+        resp = requests.post(webhook_url, json={"text": texto}, timeout=30)
+        if resp.status_code in (200, 202):
+            if logger:
+                logger.info("Notificacion enviada al canal de Teams via webhook")
+            return True
+        if logger:
+            logger.error(f"Error al enviar a Teams (HTTP {resp.status_code}): {(resp.text or '')[:300]}")
+        return False
+    except Exception as e:
+        if logger:
+            logger.error(f"Error al enviar a Teams via webhook: {e}")
+        return False
+
+
 def send_notification_email(subject, body, log_file_path=None, logger=None):
+    # Prioridad 0: webhook de Teams (multi-persona, sin dominios ni IPs)
+    teams_url = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
+    if teams_url:
+        if _enviar_via_teams(teams_url, subject, body, logger):
+            return True
+        # Si Teams fallo, intentar los canales de correo como respaldo
+        if logger:
+            logger.warning("Teams fallo; intentando canales de correo como respaldo...")
+
     resend_key = os.getenv("RESEND_API_KEY", "").strip()
     smtp_server = os.getenv("SMTP_SERVER", "").strip()
     sender_email = os.getenv("SENDER_EMAIL", "").strip()
