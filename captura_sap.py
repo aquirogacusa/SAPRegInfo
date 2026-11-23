@@ -56,6 +56,16 @@ def leer_filtro_productos(ruta):
     return productos
 
 
+def clave_material(matnr):
+    """Clave de comparacion de materiales: quita ceros a la izquierda en valores
+    numericos para que '1093510' y '0000001093510' equivalgan. Solo se usa para
+    comparar; nunca se escribe en SAP (SAP aplica su propia conversion)."""
+    m = (matnr or '').strip()
+    if m.isdigit():
+        return m.lstrip('0') or '0'
+    return m
+
+
 def leer_plantas_asignadas(ruta):
     if not os.path.isfile(ruta):
         return {}
@@ -313,6 +323,7 @@ def main():
             # salida temprana al encontrar todos los objetivo y deteccion de fin
             # de tabla con una sola lectura COM por pagina.
             existing_materials = set()
+            existing_claves = set()
 
             # Proteccion para corridas largas: si SAP rechazo la consulta (ej.
             # combinacion org/canal invalida), abortar el cliente con un mensaje
@@ -336,7 +347,7 @@ def main():
                 print("   -> Tabla vacia: ningun producto del filtro existe para este cliente (escaneo omitido).")
             else:
                 print("   -> Leyendo productos existentes en SAP...")
-                target_set = set(productos_objetivo)
+                target_claves = {clave_material(p) for p in productos_objetivo}
                 paginas_vistas = set()
                 while True:
                     tabla = session.findById(table_id)
@@ -362,9 +373,10 @@ def main():
                     for val in current_page:
                         if val:
                             existing_materials.add(val)
+                            existing_claves.add(clave_material(val))
 
                     # Salida temprana: ya encontramos todos los productos objetivo
-                    if target_set and target_set.issubset(existing_materials):
+                    if target_claves and target_claves.issubset(existing_claves):
                         break
 
                     # Avanzar pagina; detectar el fin con 1 sola lectura COM
@@ -380,8 +392,10 @@ def main():
                 print(f"   -> Se encontraron {len(existing_materials)} productos existentes.")
             
             # --- FASE 2: INSERTAR PRODUCTOS QUE NO EXISTEN ---
-            # Usa la lista objetivo (filtro si existe, si no todos los productos)
-            nuevos_productos = [p for p in productos_objetivo if p not in existing_materials]
+            # Usa la lista objetivo (filtro si existe, si no todos los productos).
+            # La comparacion se hace por clave (sin ceros a la izquierda) para que
+            # el formato del CSV no importe frente a como SAP muestra el material.
+            nuevos_productos = [p for p in productos_objetivo if clave_material(p) not in existing_claves]
             
             inserted_any = False
             if nuevos_productos:
@@ -449,12 +463,14 @@ def main():
             # --- FASE 3: ASIGNAR/ACTUALIZAR PLANTA A LOS PRODUCTOS DEL LISTADO ---
             # Conjunto exacto de materiales que hay que marcar con la planta:
             # los que ya existian (solo los objetivo) mas los recien insertados.
-            materiales_por_marcar = (existing_materials & set(productos_objetivo)) | set(nuevos_productos)
+            # Se trabaja con claves (sin ceros a la izquierda) para que la
+            # comparacion no dependa del formato con que SAP muestra el material.
+            claves_por_marcar = ({clave_material(v) for v in existing_materials} & {clave_material(p) for p in productos_objetivo}) | {clave_material(p) for p in nuevos_productos}
             updated_products = set()
             filas_sin_planta = []
 
-            if materiales_por_marcar:
-                print(f"   -> Asignando/actualizando plantas para {len(materiales_por_marcar)} productos...")
+            if claves_por_marcar:
+                print(f"   -> Asignando/actualizando plantas para {len(claves_por_marcar)} productos...")
 
                 # Volver al inicio de la tabla
                 scroll_al_inicio(session)
@@ -482,7 +498,8 @@ def main():
                     paginas_vistas_f3.add(firma)
 
                     for row_in_screen, matnr in enumerate(current_page):
-                        if not matnr or matnr not in materiales_por_marcar or matnr in updated_products:
+                        clave_fila = clave_material(matnr)
+                        if not matnr or clave_fila not in claves_por_marcar or clave_fila in updated_products:
                             continue
 
                         print(f"   -> Asignando planta a {matnr} (fila {row_in_screen})...")
@@ -518,12 +535,12 @@ def main():
                                 print(f"      No se pudo asignar planta a {matnr}: {e}")
 
                         if asignada:
-                            updated_products.add(matnr)
+                            updated_products.add(clave_fila)
                         else:
                             filas_sin_planta.append(matnr)
 
                     # Salida temprana: ya se marco todo lo necesario
-                    if materiales_por_marcar.issubset(updated_products):
+                    if claves_por_marcar.issubset(updated_products):
                         break
 
                     # Avanzar pagina; detectar el fin con 1 sola lectura COM
