@@ -123,43 +123,69 @@ def main():
         print(f"[{idx_cliente}/{len(clientes)}] Procesando Cliente: {kunnr} | Planta: {plant}")
         
         try:
-            # Forzar cierre de cualquier transacción previa y abrir VD52 limpiamente
-            # Usamos /nVD52 en el campo okcd para garantizar que se cierra lo anterior
-            session.findById("wnd[0]/tbar[0]/okcd").text = "/nVD52"
-            session.findById("wnd[0]").sendVKey(0)
-            time.sleep(1.5)  # Esperar a que SAP cargue la pantalla de VD52
-            
-            # Cerrar cualquier popup/modal que aparezca (ej. "¿Guardar cambios?")
-            for _ in range(3):
+            # Cancelar cualquier transaccion/pantalla previa que haya quedado abierta.
+            # F12 repetido cancela primero los modales pendientes ("¿Guardar cambios?")
+            # y luego la pantalla activa, evitando arrastrar el contexto/autocompletado
+            # de la consulta anterior.
+            for _ in range(4):
                 try:
-                    modal = session.findById("wnd[1]")
-                    # Intentar presionar "No" o el botón de la izquierda para descartar
+                    session.findById("wnd[0]").sendVKey(12)  # F12 = Cancelar
+                    time.sleep(0.3)
+                except Exception:
+                    break
+
+            # Abrir VD52 reintentando la NAVEGACION completa: antes solo se
+            # reintentaba el llenado de campos, lo que fallaba cuando la pantalla
+            # de seleccion nunca llego a cargar (quedaba pegado en la corrida anterior).
+            max_nav = 4
+            pantalla_ok = False
+            for nav_intent in range(1, max_nav + 1):
+                session.findById("wnd[0]/tbar[0]/okcd").text = "/nVD52"
+                session.findById("wnd[0]").sendVKey(0)
+                time.sleep(2.0)  # Esperar a que SAP cargue la pantalla de VD52
+
+                # Cerrar cualquier popup/modal (ej. "¿Guardar cambios?"). Hasta 4 por
+                # si aparecen varios en cadena. Preferimos "No"/Cancelar: nunca el
+                # boton por defecto, para no arrastrar datos de la consulta anterior.
+                for _ in range(4):
                     try:
-                        session.findById("wnd[1]/usr/btnSPOP-OPTION2").press()  # Botón "No"
-                    except:
+                        session.findById("wnd[1]")
+                    except Exception:
+                        break  # No hay modal, continuamos
+                    try:
+                        session.findById("wnd[1]/usr/btnSPOP-OPTION2").press()  # Boton "No"
+                    except Exception:
                         try:
-                            session.findById("wnd[1]/tbar[0]/btn[0]").press()  # Botón genérico
-                        except:
-                            modal.sendVKey(12)  # Cancelar modal
+                            session.findById("wnd[1]/tbar[0]/btn[12]").press()  # Cancelar
+                        except Exception:
+                            try:
+                                session.findById("wnd[1]").sendVKey(12)
+                            except Exception:
+                                pass
                     time.sleep(0.5)
-                except:
-                    break  # No hay modal, continuamos
-            
-            # Pantalla inicial de Selección - con reintentos por si la pantalla tarda en cargar
-            max_retries = 3
-            for attempt in range(max_retries):
+
+                # Verificar que SI estamos en la pantalla de seleccion de VD52
+                # y llenar los datos del cliente solo cuando el control exista
                 try:
-                    # Verificar que los campos requeridos son accesibles
                     session.findById("wnd[0]/usr/ctxtKUNNR").text = kunnr
                     session.findById("wnd[0]/usr/ctxtVKORG").text = vkorg
                     session.findById("wnd[0]/usr/ctxtVTWEG").text = vtweg
+                    pantalla_ok = True
                     break
-                except Exception as field_err:
-                    if attempt < max_retries - 1:
-                        print(f"   -> Reintentando acceso a pantalla (intento {attempt + 2}/{max_retries})...")
-                        time.sleep(1.5)
-                    else:
-                        raise field_err
+                except Exception:
+                    txn = ""
+                    try:
+                        txn = session.info.Transaction
+                    except Exception:
+                        pass
+                    print(f"   -> Pantalla de seleccion no disponible (intento {nav_intent}/{max_nav}, txn={txn}). Reintentando...")
+                    time.sleep(1.5)
+
+            if not pantalla_ok:
+                raise RuntimeError(
+                    "No se pudo abrir la pantalla de seleccion de VD52 despues de "
+                    "varios intentos. Verifica que SAP este logueado y sin ventanas pendientes."
+                )
             
             print(f"   -> Ingresando Cliente: {kunnr}")
             print(f"   -> Ingresando Org Ventas: {vkorg}")
