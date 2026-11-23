@@ -108,7 +108,9 @@ def main():
     print(f"Se encontraron {len(clientes)} clientes y {len(productos)} productos.")
     print("Iniciando procesamiento...")
     print("-" * 50)
-    
+
+    t_inicio_corrida = time.time()
+
     for idx_cliente, cliente in enumerate(clientes, 1):
         kunnr = cliente['Cliente'].strip()
         vkorg = cliente['OrgVentas'].strip()
@@ -121,7 +123,8 @@ def main():
             continue
         
         print(f"[{idx_cliente}/{len(clientes)}] Procesando Cliente: {kunnr} | Planta: {plant}")
-        
+        t_cliente = time.time()
+
         try:
             # Cancelar cualquier transaccion/pantalla previa que haya quedado abierta.
             # F12 repetido cancela primero los modales pendientes ("¿Guardar cambios?")
@@ -283,45 +286,98 @@ def main():
                 vis_rows = tabla.visibleRowCount
             except Exception:
                 vis_rows = 15  # Fallback seguro
-            
-            # --- FASE 1: LEER PRODUCTOS EXISTENTES EN SAP (ESCANEO POR TECLADO) ---
-            print("   -> Leyendo productos existentes en SAP...")
-            scroll_al_inicio(session)
-            
-            existing_materials = set()
-            last_page_signature = None
-            
-            while True:
-                tabla = session.findById(table_id)
-                current_page = []
-                for row_in_screen in range(vis_rows):
-                    try:
-                        val = session.findById(f"{table_id}/ctxtMV10A-MATNR[0,{row_in_screen}]").text.strip()
-                        current_page.append(val)
-                    except Exception:
-                        current_page.append("")
-                
-                if current_page == last_page_signature:
-                    break
-                last_page_signature = current_page
-                
-                read_any = False
-                for val in current_page:
-                    if val:
-                        existing_materials.add(val)
-                        read_any = True
-                        
-                if not read_any:
-                    break
-                    
-                # Avanzar página
+
+            # Detectar si la tabla tiene columna de Planta (WERKS): permite escribir
+            # la planta directamente en la celda en vez de abrir el detalle (F2) por
+            # producto. Si no se detecta o la celda no acepta el valor, se usa el
+            # metodo de detalle de siempre (fallback seguro).
+            celda_planta_prefijo = None
+            try:
+                columnas = tabla.ColumnOrder
                 try:
-                    session.findById("wnd[0]").sendVKey(82)  # Page Down
-                    time.sleep(0.3)
+                    columnas = list(columnas)
                 except Exception:
-                    break
+                    columnas = [columnas(i) for i in range(columnas.Count)]
+                for col in columnas:
+                    if str(col).upper().endswith("WERKS"):
+                        celda_planta_prefijo = f"{table_id}/ctxtMV10A-{col}"
+                        break
+            except Exception:
+                celda_planta_prefijo = None
             
-            print(f"   -> Se encontraron {len(existing_materials)} productos existentes.")
+            # --- FASE 1: LEER PRODUCTOS EXISTENTES EN SAP (OPTIMIZADO) ---
+            # OPTIMIZACION: como la consulta ya viene filtrada por Material
+            # (productos_filtros.csv), una tabla vacia implica que NINGUN producto
+            # del filtro existe para este cliente => se omite el escaneo completo
+            # y se insertan todos. Si hay registros, se escanea solo lo necesario:
+            # salida temprana al encontrar todos los objetivo y deteccion de fin
+            # de tabla con una sola lectura COM por pagina.
+            existing_materials = set()
+
+            # Proteccion para corridas largas: si SAP rechazo la consulta (ej.
+            # combinacion org/canal invalida), abortar el cliente con un mensaje
+            # claro en vez de insertar sobre una pantalla rota.
+            try:
+                sbar = session.findById("wnd[0]/sbar")
+                if sbar.MessageType == "E":
+                    raise RuntimeError(f"SAP rechazo la consulta: {sbar.Text}")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+
+            # Leer solo la primera fila: si esta vacia, no hay nada que validar
+            try:
+                primera_fila = session.findById(f"{table_id}/ctxtMV10A-MATNR[0,0]").text.strip()
+            except Exception:
+                primera_fila = ""
+
+            if not primera_fila:
+                print("   -> Tabla vacia: ningun producto del filtro existe para este cliente (escaneo omitido).")
+            else:
+                print("   -> Leyendo productos existentes en SAP...")
+                target_set = set(productos_objetivo)
+                paginas_vistas = set()
+                while True:
+                    tabla = session.findById(table_id)
+                    try:
+                        pos_antes = tabla.FirstVisibleRow
+                    except Exception:
+                        pos_antes = None
+
+                    current_page = []
+                    for row_in_screen in range(vis_rows):
+                        try:
+                            val = session.findById(f"{table_id}/ctxtMV10A-MATNR[0,{row_in_screen}]").text.strip()
+                            current_page.append(val)
+                        except Exception:
+                            current_page.append("")
+
+                    # Red de seguridad contra bucles: no repetir paginas
+                    firma = tuple(current_page)
+                    if firma in paginas_vistas:
+                        break
+                    paginas_vistas.add(firma)
+
+                    for val in current_page:
+                        if val:
+                            existing_materials.add(val)
+
+                    # Salida temprana: ya encontramos todos los productos objetivo
+                    if target_set and target_set.issubset(existing_materials):
+                        break
+
+                    # Avanzar pagina; detectar el fin con 1 sola lectura COM
+                    try:
+                        session.findById("wnd[0]").sendVKey(82)  # Page Down
+                        time.sleep(0.2)
+                        pos_despues = session.findById(table_id).FirstVisibleRow
+                        if pos_antes is not None and pos_despues == pos_antes:
+                            break  # la vista no avanzo: fin de la tabla
+                    except Exception:
+                        break
+
+                print(f"   -> Se encontraron {len(existing_materials)} productos existentes.")
             
             # --- FASE 2: INSERTAR PRODUCTOS QUE NO EXISTEN ---
             # Usa la lista objetivo (filtro si existe, si no todos los productos)
@@ -330,9 +386,11 @@ def main():
             inserted_any = False
             if nuevos_productos:
                 print(f"   -> Insertando {len(nuevos_productos)} nuevos productos...")
-                
-                # Ir al final de la tabla
-                scroll_al_final(session)
+
+                # Ir al final de la tabla (solo si hay registros previos; si la
+                # tabla esta vacia la primera fila libre esta al inicio)
+                if existing_materials:
+                    scroll_al_final(session)
                 
                 def buscar_fila_vacia():
                     """Busca la primera fila vacía en la pantalla actual.
@@ -388,63 +446,112 @@ def main():
                 session.findById("wnd[0]").sendVKey(0)  # Enter
                 time.sleep(1)
             
-            # --- FASE 3: ASIGNAR/ACTUALIZAR PLANTA A LOS PRODUCTOS DE PRODUCTOS.CSV (UNIFICADO) ---
-            print("   -> Asignando/actualizando plantas para los productos del listado...")
-            
-            # Volver al inicio de la tabla
-            scroll_al_inicio(session)
-            
+            # --- FASE 3: ASIGNAR/ACTUALIZAR PLANTA A LOS PRODUCTOS DEL LISTADO ---
+            # Conjunto exacto de materiales que hay que marcar con la planta:
+            # los que ya existian (solo los objetivo) mas los recien insertados.
+            materiales_por_marcar = (existing_materials & set(productos_objetivo)) | set(nuevos_productos)
             updated_products = set()
-            last_page_signature = None
-            
-            while True:
-                tabla = session.findById(table_id)
-                current_page = []
-                for row_in_screen in range(vis_rows):
+            filas_sin_planta = []
+
+            if materiales_por_marcar:
+                print(f"   -> Asignando/actualizando plantas para {len(materiales_por_marcar)} productos...")
+
+                # Volver al inicio de la tabla
+                scroll_al_inicio(session)
+
+                paginas_vistas_f3 = set()
+                while True:
+                    tabla = session.findById(table_id)
                     try:
-                        val = session.findById(f"{table_id}/ctxtMV10A-MATNR[0,{row_in_screen}]").text.strip()
-                        current_page.append(val)
+                        pos_antes = tabla.FirstVisibleRow
                     except Exception:
-                        current_page.append("")
-                        
-                if current_page == last_page_signature:
-                    break
-                last_page_signature = current_page
-                
-                read_any = False
-                for row_in_screen, matnr in enumerate(current_page):
-                    if matnr:
-                        read_any = True
-                        if matnr in productos_objetivo and matnr not in updated_products:
-                            print(f"   -> Actualizando planta para {matnr} en fila visible {row_in_screen}")
-                            
-                            # Re-obtener la tabla para evitar COM obsoletos
-                            tabla = session.findById(table_id)
-                            
-                            # Foco en el material e ir a detalle (F2)
-                            session.findById(f"{table_id}/ctxtMV10A-MATNR[0,{row_in_screen}]").setFocus()
-                            session.findById("wnd[0]").sendVKey(2)  # F2
-                            time.sleep(0.3)
-                            
-                            # Asignar la Planta
-                            session.findById("wnd[0]/usr/ctxtMV10A-WERKS").text = plant
-                            session.findById("wnd[0]/tbar[0]/btn[3]").press()  # F3 - Volver
-                            time.sleep(0.3)
-                            
+                        pos_antes = None
+
+                    current_page = []
+                    for row_in_screen in range(vis_rows):
+                        try:
+                            val = session.findById(f"{table_id}/ctxtMV10A-MATNR[0,{row_in_screen}]").text.strip()
+                            current_page.append(val)
+                        except Exception:
+                            current_page.append("")
+
+                    # Red de seguridad contra bucles: no repetir paginas
+                    firma = tuple(current_page)
+                    if firma in paginas_vistas_f3:
+                        break
+                    paginas_vistas_f3.add(firma)
+
+                    for row_in_screen, matnr in enumerate(current_page):
+                        if not matnr or matnr not in materiales_por_marcar or matnr in updated_products:
+                            continue
+
+                        print(f"   -> Asignando planta a {matnr} (fila {row_in_screen})...")
+
+                        # Intento 1: escritura directa en la celda de planta (rapido)
+                        asignada = False
+                        if celda_planta_prefijo:
+                            try:
+                                celda = session.findById(f"{celda_planta_prefijo}[0,{row_in_screen}]")
+                                celda.text = plant
+                                if celda.text.strip() == plant:
+                                    asignada = True
+                            except Exception:
+                                asignada = False
+
+                        # Intento 2 (fallback): pantalla de detalle (F2) como siempre
+                        if not asignada:
+                            try:
+                                # Re-obtener la tabla para evitar COM obsoletos
+                                tabla = session.findById(table_id)
+
+                                # Foco en el material e ir a detalle (F2)
+                                session.findById(f"{table_id}/ctxtMV10A-MATNR[0,{row_in_screen}]").setFocus()
+                                session.findById("wnd[0]").sendVKey(2)  # F2
+                                time.sleep(0.3)
+
+                                # Asignar la Planta
+                                session.findById("wnd[0]/usr/ctxtMV10A-WERKS").text = plant
+                                session.findById("wnd[0]/tbar[0]/btn[3]").press()  # F3 - Volver
+                                time.sleep(0.3)
+                                asignada = True
+                            except Exception as e:
+                                print(f"      No se pudo asignar planta a {matnr}: {e}")
+
+                        if asignada:
                             updated_products.add(matnr)
-                            
-                if not read_any:
-                    break
-                    
-                # Avanzar página
-                try:
-                    session.findById("wnd[0]").sendVKey(82)  # Page Down
-                    time.sleep(0.3)
-                except Exception:
-                    break
-                
+                        else:
+                            filas_sin_planta.append(matnr)
+
+                    # Salida temprana: ya se marco todo lo necesario
+                    if materiales_por_marcar.issubset(updated_products):
+                        break
+
+                    # Avanzar pagina; detectar el fin con 1 sola lectura COM
+                    try:
+                        session.findById("wnd[0]").sendVKey(82)  # Page Down
+                        time.sleep(0.2)
+                        pos_despues = session.findById(table_id).FirstVisibleRow
+                        if pos_antes is not None and pos_despues == pos_antes:
+                            break  # la vista no avanzo: fin de la tabla
+                    except Exception:
+                        break
+
+                if filas_sin_planta:
+                    print(f"   -> AVISO: no se pudo asignar planta a: {', '.join(filas_sin_planta)}")
+
+                # Si se escribieron plantas directo en celdas, validar antes de guardar
+                if updated_products and celda_planta_prefijo:
+                    session.findById("wnd[0]").sendVKey(0)  # Enter para validar ediciones
+                    time.sleep(0.5)
+
             session.findById("wnd[0]/tbar[0]/btn[11]").press()
             print(f" -> ¡Cliente {kunnr} guardado con éxito!")
+
+            # Estadisticas para corridas largas
+            t_cliente = time.time() - t_cliente
+            promedio = (time.time() - t_inicio_corrida) / idx_cliente
+            restante_min = promedio * (len(clientes) - idx_cliente) / 60
+            print(f" -> Tiempo cliente: {t_cliente:.1f}s | Promedio: {promedio:.1f}s/cliente | Restante estimado: {restante_min:.0f} min")
             
         except Exception as e:
             import traceback
