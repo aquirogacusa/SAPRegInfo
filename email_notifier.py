@@ -22,15 +22,20 @@ def _get_ssl_context():
 
 
 def send_notification_email(subject, body, log_file_path=None, logger=None):
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_server = os.getenv("SMTP_SERVER", "")
+    smtp_port = int(os.getenv("SMTP_PORT", "25"))
     sender_email = os.getenv("SENDER_EMAIL", "")
+    # SENDER_PASSWORD es OPCIONAL: solo para servidores que exigen login
+    # (ej. Gmail con password de aplicacion). En el relay corporativo
+    # (autorizado por IP) se deja vacio y se envia sin autenticacion.
     sender_password = os.getenv("SENDER_PASSWORD", "")
+    # Escape para relays que exigen STARTTLS incluso sin credenciales
+    use_tls = os.getenv("SMTP_USE_TLS", "").strip() in ("1", "true", "True")
     recipients_raw = os.getenv("EMAIL_RECIPIENTS", "")
 
-    if not sender_email or not sender_password:
+    if not smtp_server or not sender_email:
         if logger:
-            logger.warning("No se envio correo: SENDER_EMAIL o SENDER_PASSWORD no configurados en .env")
+            logger.warning("No se envio correo: SMTP_SERVER o SENDER_EMAIL no configurados en .env")
         return False
 
     recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
@@ -79,10 +84,25 @@ def send_notification_email(subject, body, log_file_path=None, logger=None):
 
     try:
         context = _get_ssl_context()
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls(context=context)
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, recipients, msg.as_string())
+        if smtp_port == 465:
+            # Puerto SSL implicito (estilo Gmail SSL)
+            with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30, context=context) as server:
+                if sender_password:
+                    server.login(sender_email, sender_password)
+                server.sendmail(sender_email, recipients, msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
+                # Relay corporativo sin credenciales: envio plano en puerto 25.
+                # TLS solo si hay password (Gmail) o se pide con SMTP_USE_TLS=1.
+                if sender_password or use_tls:
+                    try:
+                        server.starttls(context=context)
+                    except smtplib.SMTPNotSupportedError as tls_err:
+                        if use_tls and not sender_password and logger:
+                            logger.warning(f"El servidor no soporto STARTTLS, se envia plano: {tls_err}")
+                if sender_password:
+                    server.login(sender_email, sender_password)
+                server.sendmail(sender_email, recipients, msg.as_string())
         if logger:
             logger.info(f"Correo enviado exitosamente a: {', '.join(recipients)}")
         return True
