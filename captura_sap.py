@@ -99,8 +99,11 @@ def main():
     productos_filtro = leer_filtro_productos('productos_filtros.csv')
     if productos_filtro:
         print(f"Se encontraron {len(productos_filtro)} productos para aplicar como filtro en la consulta.")
+        # Cuando hay filtro, SOLO se gestionan esos productos en toda la corrida
+        productos_objetivo = productos_filtro
     else:
         print("No hay productos de filtro o el archivo productos_filtros.csv esta vacio/ausente. Se omite el filtro.")
+        productos_objetivo = productos
     
     print(f"Se encontraron {len(clientes)} clientes y {len(productos)} productos.")
     print("Iniciando procesamiento...")
@@ -295,7 +298,8 @@ def main():
             print(f"   -> Se encontraron {len(existing_materials)} productos existentes.")
             
             # --- FASE 2: INSERTAR PRODUCTOS QUE NO EXISTEN ---
-            nuevos_productos = [p for p in productos if p not in existing_materials]
+            # Usa la lista objetivo (filtro si existe, si no todos los productos)
+            nuevos_productos = [p for p in productos_objetivo if p not in existing_materials]
             
             inserted_any = False
             if nuevos_productos:
@@ -385,7 +389,7 @@ def main():
                 for row_in_screen, matnr in enumerate(current_page):
                     if matnr:
                         read_any = True
-                        if matnr in productos and matnr not in updated_products:
+                        if matnr in productos_objetivo and matnr not in updated_products:
                             print(f"   -> Actualizando planta para {matnr} en fila visible {row_in_screen}")
                             
                             # Re-obtener la tabla para evitar COM obsoletos
