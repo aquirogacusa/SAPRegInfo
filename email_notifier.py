@@ -237,16 +237,12 @@ def _enviar_via_teams(webhook_url, subject, body, log_file_path, logger):
 
 
 def send_notification_email(subject, body, log_file_path=None, logger=None):
-    # Prioridad 0: webhook de Teams (multi-persona, sin dominios ni IPs)
+    """Notifica por TODOS los canales configurados (cada uno es backup de los
+    demas): Teams (webhook), Resend (API), Brevo (API) y SMTP (relay/login).
+    Retorna True si al menos un canal logro enviar."""
     teams_url = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
-    if teams_url:
-        if _enviar_via_teams(teams_url, subject, body, log_file_path, logger):
-            return True
-        # Si Teams fallo, intentar los canales de correo como respaldo
-        if logger:
-            logger.warning("Teams fallo; intentando canales de correo como respaldo...")
-
     resend_key = os.getenv("RESEND_API_KEY", "").strip()
+    brevo_key = os.getenv("BREVO_API_KEY", "").strip()
     smtp_server = os.getenv("SMTP_SERVER", "").strip()
     sender_email = os.getenv("SENDER_EMAIL", "").strip()
     # SENDER_PASSWORD es OPCIONAL: solo para servidores SMTP que exigen login
@@ -255,49 +251,84 @@ def send_notification_email(subject, body, log_file_path=None, logger=None):
     use_tls = os.getenv("SMTP_USE_TLS", "").strip() in ("1", "true", "True")
     recipients_raw = os.getenv("EMAIL_RECIPIENTS", "")
 
-    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    destinatarios_base = [r.strip() for r in recipients_raw.split(",") if r.strip()]
 
-    # Prioridad 1: API de Resend (si esta configurada)
+    def lista_con_it():
+        """Copia de destinatarios con el destinatario corporativo forzado."""
+        lista = list(destinatarios_base)
+        if ALWAYS_INCLUDE_RECIPIENT not in lista:
+            lista.append(ALWAYS_INCLUDE_RECIPIENT)
+        return lista
+
+    resultados = []
+    canales_ok = []
+
+    # Canal 1: Teams (instantaneo, multi-persona, sin adjuntos)
+    if teams_url:
+        ok = _enviar_via_teams(teams_url, subject, body, log_file_path, logger)
+        resultados.append(ok)
+        if ok:
+            canales_ok.append("Teams")
+
+    # Canal 2: Resend (API). Mientras el remitente sea el dominio de pruebas
+    # (resend.dev), Resend solo entrega a la propia cuenta registrada: no
+    # forzamos el destinatario corporativo porque rechazaria el envio completo.
     if resend_key:
         from_addr = os.getenv("RESEND_FROM", "onboarding@resend.dev").strip()
-        # Mientras el remitente sea el dominio de pruebas (resend.dev), Resend
-        # solo entrega a la propia cuenta registrada: no forzamos el
-        # destinatario corporativo porque rechazaria el envio completo.
-        if "resend.dev" not in from_addr and ALWAYS_INCLUDE_RECIPIENT not in recipients:
-            recipients.append(ALWAYS_INCLUDE_RECIPIENT)
-        if not recipients:
+        dest_resend = list(destinatarios_base)
+        if "resend.dev" not in from_addr:
+            dest_resend = lista_con_it()
+        if not dest_resend:
             if logger:
-                logger.warning("No se envio correo: no hay destinatarios configurados (EMAIL_RECIPIENTS)")
-            return False
-        return _enviar_via_resend(resend_key, from_addr, subject, body, recipients, log_file_path, logger)
+                logger.warning("Resend omitido: no hay destinatarios configurados (EMAIL_RECIPIENTS)")
+            resultados.append(False)
+        else:
+            ok = _enviar_via_resend(resend_key, from_addr, subject, body, dest_resend, log_file_path, logger)
+            resultados.append(ok)
+            if ok:
+                canales_ok.append("Resend")
 
-    # Prioridad 2: API de Brevo (plan gratuito, 300 correos/dia)
-    brevo_key = os.getenv("BREVO_API_KEY", "").strip()
+    # Canal 3: Brevo (plan gratuito, 300 correos/dia, con adjunto)
     if brevo_key:
         from_addr = os.getenv("BREVO_FROM", "").strip() or sender_email
         if not from_addr:
             if logger:
-                logger.warning("No se envio correo via Brevo: define BREVO_FROM o SENDER_EMAIL (el remitente verificado en Brevo)")
-            return False
-        if not recipients:
-            if logger:
-                logger.warning("No se envio correo: no hay destinatarios configurados (EMAIL_RECIPIENTS)")
-            return False
-        if ALWAYS_INCLUDE_RECIPIENT not in recipients:
-            recipients.append(ALWAYS_INCLUDE_RECIPIENT)
-        return _enviar_via_brevo(brevo_key, from_addr, subject, body, recipients, log_file_path, logger)
+                logger.warning("Brevo omitido: define BREVO_FROM o SENDER_EMAIL (el remitente verificado en Brevo)")
+            resultados.append(False)
+        else:
+            dest_brevo = lista_con_it()
+            if not dest_brevo:
+                if logger:
+                    logger.warning("Brevo omitido: no hay destinatarios configurados (EMAIL_RECIPIENTS)")
+                resultados.append(False)
+            else:
+                ok = _enviar_via_brevo(brevo_key, from_addr, subject, body, dest_brevo, log_file_path, logger)
+                resultados.append(ok)
+                if ok:
+                    canales_ok.append("Brevo")
 
-    # Prioridad 3: SMTP clasico (relay corporativo o con login)
+    # Canal 4: SMTP clasico (relay corporativo o con login)
     if smtp_server and sender_email:
-        if not recipients:
+        dest_smtp = lista_con_it()
+        if not dest_smtp:
             if logger:
-                logger.warning("No se envio correo: no hay destinatarios configurados (EMAIL_RECIPIENTS)")
-            return False
-        if ALWAYS_INCLUDE_RECIPIENT not in recipients:
-            recipients.append(ALWAYS_INCLUDE_RECIPIENT)
-        return _enviar_via_smtp(smtp_server, smtp_port, sender_email, sender_password,
-                                use_tls, subject, body, recipients, log_file_path, logger)
+                logger.warning("SMTP omitido: no hay destinatarios configurados (EMAIL_RECIPIENTS)")
+            resultados.append(False)
+        else:
+            ok = _enviar_via_smtp(smtp_server, smtp_port, sender_email, sender_password,
+                                  use_tls, subject, body, dest_smtp, log_file_path, logger)
+            resultados.append(ok)
+            if ok:
+                canales_ok.append("SMTP")
+
+    if not resultados:
+        if logger:
+            logger.warning("No se envio notificacion: no hay canales configurados (TEAMS_WEBHOOK_URL, RESEND_API_KEY, BREVO_API_KEY o SMTP_SERVER/SENDER_EMAIL)")
+        return False
 
     if logger:
-        logger.warning("No se envio correo: configura TEAMS_WEBHOOK_URL, RESEND_API_KEY, BREVO_API_KEY o SMTP_SERVER/SENDER_EMAIL en .env")
-    return False
+        if canales_ok:
+            logger.info(f"Canales de notificacion exitosos: {', '.join(canales_ok)}")
+        else:
+            logger.warning("Ningun canal de notificacion pudo enviar (todos fallaron)")
+    return any(resultados)
