@@ -792,6 +792,27 @@ def main():
             print(f" -> ERROR procesando cliente {kunnr}:")
             traceback.print_exc()
 
+            # Verificar si la sesion SAP sigue viva (ej. otro bot expulso la
+            # sesion o se cayo la conexion). Si murio, no tiene sentido seguir:
+            # terminamos con alerta; el checkpoint permite reanudar despues.
+            sesion_viva = False
+            try:
+                sesion_viva = bool(session.info.Transaction)
+            except Exception:
+                sesion_viva = False
+
+            if not sesion_viva:
+                print(f"   -> La sesion SAP ya no responde (posible expulsion de sesion o caida). Deteniendo corrida en el cliente {idx_cliente}.")
+                notificar_progreso_teams(
+                    f"[SAP RegInfo] SESION SAP PERDIDA - corrida detenida (cliente {idx_cliente}/{len(clientes)})",
+                    f"Ultimo cliente en proceso: {kunnr}\n"
+                    f"Clientes OK acumulados: {len(clientes_ok_previos)}\n"
+                    f"Clientes pendientes: {len(clientes) - len(clientes_ok_previos)}\n\n"
+                    "ACCION: revisa la sesion de SAP (posible otro bot/login que la expulso), "
+                    "crea el archivo CONTINUAR.txt y relanza ejecutar.bat para continuar."
+                )
+                break  # corta el ciclo de clientes; run.py cerrara con notificacion final
+
             # Checkpoint/bitacora del error (la corrida sigue con el siguiente)
             ts_ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             checkpoint_data["clientes_error"][str(kunnr)] = ts_ahora
