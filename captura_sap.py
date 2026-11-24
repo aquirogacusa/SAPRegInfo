@@ -4,7 +4,15 @@ import json
 import sys
 import time
 import os
+from datetime import datetime
 import win32clipboard
+
+# --- Checkpoint / reanudacion para corridas largas ---
+CHECKPOINT_RUTA = 'progreso_corrida.json'
+PROGRESO_TXT = 'progreso_corrida.txt'
+FLAG_CONTINUAR = 'CONTINUAR.txt'
+INTERVALO_PROGRESO_TEAMS = 200  # ping de progreso cada N clientes
+
 
 def set_clipboard_text(text):
     win32clipboard.OpenClipboard()
@@ -64,6 +72,46 @@ def clave_material(matnr):
     if m.isdigit():
         return m.lstrip('0') or '0'
     return m
+
+
+def cargar_checkpoint():
+    if not os.path.isfile(CHECKPOINT_RUTA):
+        return None
+    try:
+        with open(CHECKPOINT_RUTA, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def guardar_checkpoint(cp):
+    try:
+        with open(CHECKPOINT_RUTA, "w", encoding="utf-8") as f:
+            json.dump(cp, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        print(f"AVISO: no se pudo guardar el checkpoint: {e}")
+
+
+def registrar_progreso_txt(linea):
+    """Bitacora de progreso escrita en tiempo real: su ultima linea indica
+    siempre el ultimo cliente procesado (OK o ERROR)."""
+    try:
+        with open(PROGRESO_TXT, "a", encoding="utf-8") as f:
+            f.write(linea + "\n")
+    except Exception:
+        pass
+
+
+def notificar_progreso_teams(asunto, cuerpo):
+    """Ping de progreso a Teams. Nunca debe romper la corrida por un fallo
+    de notificacion, por eso se traga cualquier excepcion."""
+    try:
+        from dotenv import load_dotenv as _load
+        _load()
+        from email_notifier import send_notification_email as _enviar
+        _enviar(asunto, cuerpo, log_file_path=None, logger=None)
+    except Exception:
+        pass
 
 
 def leer_plantas_asignadas(ruta):
@@ -204,6 +252,40 @@ def main():
 
     t_inicio_corrida = time.time()
 
+    # --- MODO CONTINUAR (para corridas largas interrumpidas) ---
+    # Continua si existe la bandera CONTINUAR.txt o se pasa --continuar.
+    # Sin bandera, siempre inicia corrida nueva (reinicia el checkpoint).
+    continuar = ('--continuar' in sys.argv) or os.path.isfile(FLAG_CONTINUAR)
+    checkpoint_previo = cargar_checkpoint() if continuar else None
+    if continuar and checkpoint_previo:
+        clientes_ok_previos = set(checkpoint_previo.get('clientes_ok', []))
+        print(f"*** MODO CONTINUAR: {len(clientes_ok_previos)} clientes ya procesados seran omitidos. ***")
+    else:
+        clientes_ok_previos = set()
+        if continuar:
+            print("AVISO: se pidio continuar pero no hay checkpoint valido; se inicia corrida nueva.")
+
+    checkpoint_data = {
+        "iniciada": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "clientes_ok": sorted(clientes_ok_previos),
+        "clientes_error": dict(checkpoint_previo.get('clientes_error', {})) if (continuar and checkpoint_previo) else {},
+        "ultimo": None,
+    }
+    guardar_checkpoint(checkpoint_data)
+    if os.path.isfile(FLAG_CONTINUAR):
+        try:
+            os.remove(FLAG_CONTINUAR)  # bandera de un solo uso
+        except Exception:
+            pass
+
+    notificar_progreso_teams(
+        f"[SAP RegInfo] Corrida INICIADA ({'MODO CONTINUAR' if (continuar and checkpoint_previo) else 'nueva'}): {len(clientes)} clientes",
+        f"Inicio: {checkpoint_data['iniciada']}\n"
+        f"Ya procesados (se omiten): {len(clientes_ok_previos)}\n"
+        f"Pendientes: {len(clientes) - len(clientes_ok_previos)}\n"
+        f"Ping de progreso cada {INTERVALO_PROGRESO_TEAMS} clientes."
+    )
+
     for idx_cliente, cliente in enumerate(clientes, 1):
         kunnr = cliente['Cliente'].strip()
         vkorg = cliente['OrgVentas'].strip()
@@ -217,6 +299,11 @@ def main():
         
         print(f"[{idx_cliente}/{len(clientes)}] Procesando Cliente: {kunnr} | Planta: {plant}")
         t_cliente = time.time()
+
+        # En modo continuar, saltar clientes ya procesados con exito
+        if kunnr in clientes_ok_previos:
+            print(f"[{idx_cliente}/{len(clientes)}] Cliente {kunnr} ya procesado antes -> omitido (modo continuar).")
+            continue
 
         try:
             # OPTIMIZACION: si ya estamos en la pantalla de seleccion de VD52
@@ -683,12 +770,43 @@ def main():
             promedio = (time.time() - t_inicio_corrida) / idx_cliente
             restante_min = promedio * (len(clientes) - idx_cliente) / 60
             print(f" -> Tiempo cliente: {t_cliente:.1f}s | Promedio: {promedio:.1f}s/cliente | Restante estimado: {restante_min:.0f} min")
+
+            # Checkpoint en vivo + bitacora de progreso
+            clientes_ok_previos.add(kunnr)
+            ts_ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            checkpoint_data["clientes_ok"] = sorted(clientes_ok_previos)
+            checkpoint_data["ultimo"] = {
+                "idx": idx_cliente, "kunnr": kunnr, "planta": plant,
+                "ts": ts_ahora, "estado": "OK", "duracion_s": round(t_cliente, 1),
+            }
+            guardar_checkpoint(checkpoint_data)
+            registrar_progreso_txt(f"{ts_ahora} | {idx_cliente}/{len(clientes)} | {kunnr} | OK | {t_cliente:.1f}s")
+
+            # Ping de progreso a Teams cada N clientes
+            if idx_cliente % INTERVALO_PROGRESO_TEAMS == 0:
+                pct = len(clientes_ok_previos) * 100 // max(1, len(clientes))
+                restante_h = promedio * (len(clientes) - idx_cliente) / 3600
+                notificar_progreso_teams(
+                    f"[SAP RegInfo] Progreso: {len(clientes_ok_previos)}/{len(clientes)} clientes ({pct}%)",
+                    f"Ultimo OK: {kunnr} (planta {plant})\n"
+                    f"Promedio: {promedio:.1f}s/cliente\n"
+                    f"Restante estimado: {restante_h:.1f} h\n"
+                    f"Errores acumulados: {len(checkpoint_data['clientes_error'])}"
+                )
             
         except Exception as e:
             import traceback
             print(f" -> ERROR procesando cliente {kunnr}:")
             traceback.print_exc()
-            
+
+            # Checkpoint/bitacora del error (la corrida sigue con el siguiente)
+            ts_ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            checkpoint_data["clientes_error"][str(kunnr)] = ts_ahora
+            checkpoint_data["clientes_ok"] = sorted(clientes_ok_previos)
+            checkpoint_data["ultimo"] = {"idx": idx_cliente, "kunnr": kunnr, "planta": plant, "ts": ts_ahora, "estado": "ERROR"}
+            guardar_checkpoint(checkpoint_data)
+            registrar_progreso_txt(f"{ts_ahora} | {idx_cliente}/{len(clientes)} | {kunnr} | ERROR | {type(e).__name__}")
+
             # Si hubo un error, cancelamos la pantalla actual (F12) varias veces para volver al inicio
             try:
                 session.findById("wnd[0]").sendVKey(12) # Cancelar
@@ -698,6 +816,9 @@ def main():
 
     print("-" * 50)
     print("Proceso finalizado.")
+    print(f"Checkpoint final: {len(clientes_ok_previos)} clientes OK | {len(checkpoint_data['clientes_error'])} errores")
+    print(f"Ultimo cliente procesado: {checkpoint_data.get('ultimo')}")
+    print(f"Detalle por cliente en: {PROGRESO_TXT}")
 
 if __name__ == "__main__":
     main()

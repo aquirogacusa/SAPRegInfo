@@ -21,35 +21,34 @@ def run_script(script_name, logger):
     logger.info(f"Ejecutando: {script_name}")
     logger.info(f"{'=' * 60}")
 
+    output_acumulado = []
     try:
-        result = subprocess.run(
+        # Streaming en tiempo real: las lineas del script se escriben al log
+        # mientras se ejecutan (clave en corridas de varias horas, antes solo
+        # se registraba todo al final). SIN timeout: una corrida larga de
+        # miles de clientes no debe ser interrumpida.
+        process = subprocess.Popen(
             [sys.executable, script_name],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=3600
         )
-
-        if result.stdout.strip():
-            for line in result.stdout.strip().splitlines():
+        for line in process.stdout:
+            line = line.rstrip()
+            if line:
                 logger.info(line)
+            output_acumulado.append(line)
+        process.wait()
 
-        if result.stderr.strip():
-            for line in result.stderr.strip().splitlines():
-                logger.warning(line)
-
-        if result.returncode != 0:
-            logger.error(f"{script_name} finalizo con codigo de salida {result.returncode}")
-            return False, result.stdout + result.stderr
+        if process.returncode != 0:
+            logger.error(f"{script_name} finalizo con codigo de salida {process.returncode}")
+            return False, "\n".join(output_acumulado)
 
         logger.info(f"{script_name} finalizado exitosamente.")
-        return True, result.stdout + result.stderr
+        return True, "\n".join(output_acumulado)
 
-    except subprocess.TimeoutExpired:
-        msg = f"{script_name} excedio el tiempo maximo de ejecucion (1 hora)"
-        logger.error(msg)
-        return False, msg
     except Exception as e:
         msg = f"Error ejecutando {script_name}: {e}\n{traceback.format_exc()}"
         logger.error(msg)

@@ -10,5 +10,8 @@ geocode_cache.json
 plantas_asignadas.json
 logs/
 Diagnostico_*.txt
+progreso_corrida.json
+progreso_corrida.txt
+CONTINUAR.txt
 
 *.mp4
