@@ -145,14 +145,33 @@ def _enviar_via_smtp(smtp_server, smtp_port, sender_email, sender_password, use_
         return False
 
 
-def _enviar_via_teams(webhook_url, subject, body, logger):
+def _enviar_via_teams(webhook_url, subject, body, log_file_path, logger):
     """Notifica a un canal de Teams via webhook. Funciona con el Incoming
     Webhook clasico y con el Workflow de Power Automate ("Post to a channel
     when a webhook request is received"): ambos aceptan POST con {"text": ...}.
-    Sin correos, sin dominios, sin permisos por IP."""
+    Sin correos, sin dominios, sin permisos por IP.
+    Teams no permite adjuntar archivos via webhook, por lo que el detalle del
+    log se incluye como cola del propio mensaje (el final es donde quedan el
+    resumen y las estadisticas)."""
     texto = f"{subject}\n\n{body}"
-    if len(texto) > 3500:
-        texto = texto[:3500] + "\n...(contenido truncado)"
+
+    if log_file_path and os.path.isfile(log_file_path):
+        try:
+            with open(log_file_path, "r", encoding="utf-8", errors="replace") as f:
+                lineas = f.readlines()
+            cola = "".join(lineas[-120:])
+            texto += (
+                "\n\n--------------------------------------------------\n"
+                f"DETALLE: ultimas lineas de {os.path.basename(log_file_path)}:\n"
+                f"{cola}"
+            )
+        except Exception as e:
+            if logger:
+                logger.warning(f"No se pudo leer el log para el mensaje de Teams: {e}")
+
+    if len(texto) > 20000:
+        texto = texto[:20000] + "\n...(contenido truncado; el log completo queda en logs\\ del servidor)"
+
     try:
         resp = requests.post(webhook_url, json={"text": texto}, timeout=30)
         if resp.status_code in (200, 202):
@@ -172,7 +191,7 @@ def send_notification_email(subject, body, log_file_path=None, logger=None):
     # Prioridad 0: webhook de Teams (multi-persona, sin dominios ni IPs)
     teams_url = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
     if teams_url:
-        if _enviar_via_teams(teams_url, subject, body, logger):
+        if _enviar_via_teams(teams_url, subject, body, log_file_path, logger):
             return True
         # Si Teams fallo, intentar los canales de correo como respaldo
         if logger:
