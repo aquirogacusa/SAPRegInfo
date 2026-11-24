@@ -28,7 +28,7 @@ def run_script(script_name, logger):
         # se registraba todo al final). SIN timeout: una corrida larga de
         # miles de clientes no debe ser interrumpida.
         process = subprocess.Popen(
-            [sys.executable, script_name],
+            [sys.executable, "-u", script_name],  # -u = salida sin buffer (tiempo real)
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

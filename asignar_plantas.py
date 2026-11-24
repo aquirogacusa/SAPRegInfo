@@ -112,27 +112,33 @@ def geocodificar_mapbox(direccion, cache, token):
     url_direccion = urllib.parse.quote(direccion)
     url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{url_direccion}.json?access_token={token}&limit=1"
 
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        es_error_ssl = isinstance(e, ssl.SSLError) or (
-            isinstance(e, urllib.error.URLError)
-            and isinstance(getattr(e, "reason", None), ssl.SSLError)
-        )
-        if es_error_ssl and _SSL_ALLOW_INSECURE:
-            print("   -> Fallo la verificacion SSL (proxy Netskope). Reintentando sin verificar el certificado...")
-            try:
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT_INSECURE) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-            except Exception as e2:
-                print(f"   -> Error de geocodificacion: {e2}")
-                return None
-        else:
-            print(f"   -> Error de geocodificacion: {e}")
-            return None
+    data = None
+    for intento in range(1, 4):  # hasta 3 intentos por direccion
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except Exception as e:
+            es_error_ssl = isinstance(e, ssl.SSLError) or (
+                isinstance(e, urllib.error.URLError)
+                and isinstance(getattr(e, "reason", None), ssl.SSLError)
+            )
+            if es_error_ssl and _SSL_ALLOW_INSECURE:
+                print("   -> Fallo la verificacion SSL (proxy Netskope). Reintentando sin verificar el certificado...")
+                try:
+                    req = urllib.request.Request(url)
+                    with urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT_INSECURE) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                    break
+                except Exception as e2:
+                    print(f"   -> Error de geocodificacion (intento {intento}/3): {e2}")
+            else:
+                print(f"   -> Error de geocodificacion (intento {intento}/3): {e}")
+            time.sleep(1.5 * intento)  # retroceso antes del proximo intento
+
+    if data is None:
+        return None
 
     features = data.get("features", [])
     if not features:
