@@ -150,7 +150,7 @@ def _enviar_via_teams(webhook_url, subject, body, logger):
     Webhook clasico y con el Workflow de Power Automate ("Post to a channel
     when a webhook request is received"): ambos aceptan POST con {"text": ...}.
     Sin correos, sin dominios, sin permisos por IP."""
-    texto = f"**{subject}**\n\n{body}"
+    texto = f"{subject}\n\n{body}"
     if len(texto) > 3500:
         texto = texto[:3500] + "\n...(contenido truncado)"
     try:
