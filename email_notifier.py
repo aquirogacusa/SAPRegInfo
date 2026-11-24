@@ -17,6 +17,7 @@ except ImportError:
 
 ALWAYS_INCLUDE_RECIPIENT = "it@cordialsausa.com"
 RESEND_API_URL = "https://api.resend.com/emails"
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 
 
 def _get_ssl_context():
@@ -85,6 +86,54 @@ def _enviar_via_resend(api_key, from_addr, subject, body, recipients, log_file_p
     except Exception as e:
         if logger:
             logger.error(f"Error al enviar via Resend: {e}")
+        return False
+
+
+def _enviar_via_brevo(api_key, from_addr, subject, body, recipients, log_file_path, logger):
+    """Envio por API de Brevo (ex-Sendinblue): plan gratuito con 300
+    correos/dia, admite adjuntos y multiples destinatarios con solo
+    verificar la direccion remitente (sin DNS del dominio)."""
+    payload = {
+        "sender": {"email": from_addr},
+        "to": [{"email": r} for r in recipients],
+        "subject": subject,
+        "htmlContent": _build_html_body(body),
+    }
+
+    if log_file_path and os.path.isfile(log_file_path):
+        try:
+            with open(log_file_path, "r", encoding="utf-8", errors="replace") as f:
+                contenido = f.read().encode("utf-8")
+            payload["attachment"] = [{
+                "name": os.path.basename(log_file_path),
+                "content": base64.b64encode(contenido).decode("ascii"),
+            }]
+        except Exception as e:
+            if logger:
+                logger.warning(f"No se pudo adjuntar el log: {e}")
+
+    try:
+        resp = requests.post(
+            BREVO_API_URL,
+            json=payload,
+            headers={"api-key": api_key, "content-type": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            if logger:
+                logger.info(f"Correo enviado via Brevo a: {', '.join(recipients)}")
+            return True
+        detalle = (resp.text or "")[:300]
+        if logger:
+            logger.error(f"Error al enviar via Brevo (HTTP {resp.status_code}): {detalle}")
+            if resp.status_code == 401:
+                logger.warning("Brevo devolvio 401: revisa que BREVO_API_KEY sea una key valida (v3).")
+            elif resp.status_code == 400 and "sender" in detalle.lower():
+                logger.warning("Brevo rechazo el remitente: verifica la direccion en Brevo -> Senders, Domains & Dedicated IPs.")
+        return False
+    except Exception as e:
+        if logger:
+            logger.error(f"Error al enviar via Brevo: {e}")
         return False
 
 
@@ -222,7 +271,23 @@ def send_notification_email(subject, body, log_file_path=None, logger=None):
             return False
         return _enviar_via_resend(resend_key, from_addr, subject, body, recipients, log_file_path, logger)
 
-    # Prioridad 2: SMTP clasico (relay corporativo o con login)
+    # Prioridad 2: API de Brevo (plan gratuito, 300 correos/dia)
+    brevo_key = os.getenv("BREVO_API_KEY", "").strip()
+    if brevo_key:
+        from_addr = os.getenv("BREVO_FROM", "").strip() or sender_email
+        if not from_addr:
+            if logger:
+                logger.warning("No se envio correo via Brevo: define BREVO_FROM o SENDER_EMAIL (el remitente verificado en Brevo)")
+            return False
+        if not recipients:
+            if logger:
+                logger.warning("No se envio correo: no hay destinatarios configurados (EMAIL_RECIPIENTS)")
+            return False
+        if ALWAYS_INCLUDE_RECIPIENT not in recipients:
+            recipients.append(ALWAYS_INCLUDE_RECIPIENT)
+        return _enviar_via_brevo(brevo_key, from_addr, subject, body, recipients, log_file_path, logger)
+
+    # Prioridad 3: SMTP clasico (relay corporativo o con login)
     if smtp_server and sender_email:
         if not recipients:
             if logger:
@@ -234,5 +299,5 @@ def send_notification_email(subject, body, log_file_path=None, logger=None):
                                 use_tls, subject, body, recipients, log_file_path, logger)
 
     if logger:
-        logger.warning("No se envio correo: configura RESEND_API_KEY o SMTP_SERVER/SENDER_EMAIL en .env")
+        logger.warning("No se envio correo: configura TEAMS_WEBHOOK_URL, RESEND_API_KEY, BREVO_API_KEY o SMTP_SERVER/SENDER_EMAIL en .env")
     return False
