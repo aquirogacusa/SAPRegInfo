@@ -306,47 +306,40 @@ def main():
             continue
 
         try:
-            # OPTIMIZACION: si ya estamos en la pantalla de seleccion de VD52
-            # (el guardado del cliente anterior regresa aqui), se reutiliza la
-            # pantalla y se omiten los F12 y el /nVD52: menos flashazos y menos
-            # tiempo muerto por cliente.
+            # NAVEGACION SIEMPRE FRESCA: se detecto que reutilizar la pantalla
+            # de seleccion tras un guardado deja la tabla de resultados con
+            # celdas de solo-lectura (fallaba la 3ra escritura, un cliente de
+            # cada dos). El /nVD52 completo garantiza estado limpio.
             cerrar_modales(session)  # por si quedo un popup del guardado anterior
-            en_vd52 = False
-            try:
-                if session.info.Transaction == "VD52":
-                    en_vd52 = esperar_control(session, "wnd[0]/usr/ctxtKUNNR", timeout=2.0, intervalo=0.2) is not None
-            except Exception:
-                en_vd52 = False
 
-            if not en_vd52:
-                # Cancelar cualquier transaccion/pantalla previa que haya quedado
-                # abierta. F12 repetido cancela primero los modales pendientes
-                # ("¿Guardar cambios?") y luego la pantalla activa.
-                for _ in range(4):
-                    try:
-                        session.findById("wnd[0]").sendVKey(12)  # F12 = Cancelar
-                        time.sleep(0.3)
-                    except Exception:
-                        break
+            # Cancelar cualquier transaccion/pantalla previa que haya quedado
+            # abierta. F12 repetido cancela primero los modales pendientes
+            # ("¿Guardar cambios?") y luego la pantalla activa.
+            for _ in range(4):
+                try:
+                    session.findById("wnd[0]").sendVKey(12)  # F12 = Cancelar
+                    time.sleep(0.3)
+                except Exception:
+                    break
 
-                # Abrir VD52 reintentando la NAVEGACION completa.
-                max_nav = 4
-                for nav_intent in range(1, max_nav + 1):
-                    session.findById("wnd[0]/tbar[0]/okcd").text = "/nVD52"
-                    session.findById("wnd[0]").sendVKey(0)
+            # Abrir VD52 reintentando la NAVEGACION completa.
+            max_nav = 4
+            for nav_intent in range(1, max_nav + 1):
+                session.findById("wnd[0]/tbar[0]/okcd").text = "/nVD52"
+                session.findById("wnd[0]").sendVKey(0)
 
-                    # Espera activa a la pantalla de seleccion (no sleep fijo)
-                    if esperar_control(session, "wnd[0]/usr/ctxtKUNNR", timeout=6.0, intervalo=0.25):
-                        break
+                # Espera activa a la pantalla de seleccion (no sleep fijo)
+                if esperar_control(session, "wnd[0]/usr/ctxtKUNNR", timeout=6.0, intervalo=0.25):
+                    break
 
-                    cerrar_modales(session)
-                    txn = ""
-                    try:
-                        txn = session.info.Transaction
-                    except Exception:
-                        pass
-                    print(f"   -> Pantalla de seleccion no disponible (intento {nav_intent}/{max_nav}, txn={txn}). Reintentando...")
-                    time.sleep(1.0)
+                cerrar_modales(session)
+                txn = ""
+                try:
+                    txn = session.info.Transaction
+                except Exception:
+                    pass
+                print(f"   -> Pantalla de seleccion no disponible (intento {nav_intent}/{max_nav}, txn={txn}). Reintentando...")
+                time.sleep(1.0)
 
             # Verificar que SI estamos en la pantalla de seleccion de VD52
             # y llenar los datos del cliente solo cuando el control exista
