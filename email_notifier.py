@@ -50,6 +50,11 @@ def _enviar_via_resend(api_key, from_addr, subject, body, recipients, log_file_p
         "html": _build_html_body(body),
     }
 
+    # Nombre de visualizacion si se definio y el from no lo trae ya
+    from_name = os.getenv("MAIL_FROM_NAME", "").strip()
+    if from_name and "<" not in from_addr:
+        payload["from"] = f"{from_name} <{from_addr}>"
+
     # Adjuntar el log (Resend acepta adjuntos en base64)
     if log_file_path and os.path.isfile(log_file_path):
         try:
@@ -100,6 +105,11 @@ def _enviar_via_brevo(api_key, from_addr, subject, body, recipients, log_file_pa
         "htmlContent": _build_html_body(body),
     }
 
+    # Nombre de visualizacion (Brevo lo soporta en el objeto sender)
+    from_name = os.getenv("MAIL_FROM_NAME", "").strip()
+    if from_name:
+        payload["sender"]["name"] = from_name
+
     if log_file_path and os.path.isfile(log_file_path):
         try:
             with open(log_file_path, "r", encoding="utf-8", errors="replace") as f:
@@ -142,7 +152,10 @@ def _enviar_via_smtp(smtp_server, smtp_port, sender_email, sender_password, use_
     """Envio por SMTP clasico: modo relay sin credenciales (puerto 25) o
     modo con login (ej. Gmail con password de aplicacion)."""
     msg = MIMEMultipart()
-    msg["From"] = sender_email
+    # Nombre de visualizacion (disfraz legitimo): la direccion real no cambia,
+    # solo como la muestran los clientes de correo.
+    from_name = os.getenv("MAIL_FROM_NAME", "").strip()
+    msg["From"] = f"{from_name} <{sender_email}>" if from_name else sender_email
     msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
 
