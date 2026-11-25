@@ -244,6 +244,7 @@ def send_notification_email(subject, body, log_file_path=None, logger=None):
     resend_key = os.getenv("RESEND_API_KEY", "").strip()
     brevo_key = os.getenv("BREVO_API_KEY", "").strip()
     smtp_server = os.getenv("SMTP_SERVER", "").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "25"))
     sender_email = os.getenv("SENDER_EMAIL", "").strip()
     # SENDER_PASSWORD es OPCIONAL: solo para servidores SMTP que exigen login
     # (ej. Gmail con password de aplicacion). En relay corporativo se deja vacio.
