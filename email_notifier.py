@@ -7,6 +7,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+from email.utils import formataddr
 
 import requests
 
@@ -153,9 +154,10 @@ def _enviar_via_smtp(smtp_server, smtp_port, sender_email, sender_password, use_
     modo con login (ej. Gmail con password de aplicacion)."""
     msg = MIMEMultipart()
     # Nombre de visualizacion (disfraz legitimo): la direccion real no cambia,
-    # solo como la muestran los clientes de correo.
+    # solo como la muestran los clientes de correo. formataddr cita y codifica
+    # el nombre correctamente (acentos, comas, etc.).
     from_name = os.getenv("MAIL_FROM_NAME", "").strip()
-    msg["From"] = f"{from_name} <{sender_email}>" if from_name else sender_email
+    msg["From"] = formataddr((from_name, sender_email)) if from_name else sender_email
     msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
 
